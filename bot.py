@@ -99,6 +99,118 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 # Conjunto para rastrear mensajes de progreso activos
 active_messages = set()
 
+# ======================== NUEVO: SISTEMA DE PERSONALIZACIÓN TEMPORAL ======================== #
+# Diccionario para almacenar configuraciones temporales durante el flujo personalizado
+temp_custom_settings = {}
+
+# Valores disponibles para personalización
+CUSTOM_CRF_OPTIONS = ['25', '28', '30', '32', '35', '38', '40']
+CUSTOM_FPS_OPTIONS = ['20', '22', '25', '28', '30', '35']
+CUSTOM_AUDIO_OPTIONS = ['64k', '70k', '80k', '90k', '128k']
+
+def get_crf_keyboard(selected_crf=None):
+    """Genera teclado para selección de CRF con opción seleccionada marcada"""
+    buttons = []
+    row = []
+    
+    for crf in CUSTOM_CRF_OPTIONS:
+        text = f"✔️ {crf}" if selected_crf == crf else crf
+        row.append(InlineKeyboardButton(text, callback_data=f"custom_crf_{crf}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    
+    # Botones de navegación - MODIFICADO: Regresar a la izquierda, Siguiente a la derecha
+    nav_buttons = []
+    # Primero agregar el botón de regresar (izquierda)
+    nav_buttons.append(InlineKeyboardButton("🔙 Regresar", callback_data="back_to_settings"))
+    
+    # Luego agregar el botón de siguiente (derecha) si hay un CRF seleccionado
+    if selected_crf:
+        nav_buttons.append(InlineKeyboardButton("Siguiente ➡️", callback_data="custom_next_fps"))
+    
+    buttons.append(nav_buttons)
+    return InlineKeyboardMarkup(buttons)
+
+def get_fps_keyboard(selected_fps=None):
+    """Genera teclado para selección de FPS con opción seleccionada marcada"""
+    buttons = []
+    row = []
+    
+    for fps in CUSTOM_FPS_OPTIONS:
+        text = f"✔️ {fps}" if selected_fps == fps else fps
+        row.append(InlineKeyboardButton(text, callback_data=f"custom_fps_{fps}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    
+    # Botones de navegación
+    nav_buttons = [
+        InlineKeyboardButton("🔙 Atrás", callback_data="custom_back_crf")
+    ]
+    if selected_fps:
+        nav_buttons.append(InlineKeyboardButton("Siguiente ➡️", callback_data="custom_next_audio"))
+    
+    buttons.append(nav_buttons)
+    return InlineKeyboardMarkup(buttons)
+
+def get_audio_keyboard(selected_audio=None):
+    """Genera teclado para selección de audio con opción seleccionada marcada"""
+    buttons = []
+    row = []
+    
+    for audio in CUSTOM_AUDIO_OPTIONS:
+        text = f"✔️ {audio}" if selected_audio == audio else audio
+        row.append(InlineKeyboardButton(text, callback_data=f"custom_audio_{audio}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    
+    # Botones de navegación
+    nav_buttons = [
+        InlineKeyboardButton("🔙 Atrás", callback_data="custom_back_fps")
+    ]
+    if selected_audio:
+        nav_buttons.append(InlineKeyboardButton("Finalizar ✅", callback_data="custom_finish"))
+    
+    buttons.append(nav_buttons)
+    return InlineKeyboardMarkup(buttons)
+
+async def apply_custom_settings(user_id, settings):
+    """Aplica la configuración personalizada al usuario"""
+    try:
+        # Obtener configuración actual del usuario
+        current_settings = await get_user_video_settings(user_id)
+        
+        # Actualizar solo los valores personalizados
+        if 'crf' in settings:
+            current_settings['crf'] = settings['crf']
+        if 'fps' in settings:
+            current_settings['fps'] = settings['fps']
+        if 'audio_bitrate' in settings:
+            current_settings['audio_bitrate'] = settings['audio_bitrate']
+        
+        # Guardar en la base de datos
+        user_settings_col.update_one(
+            {"user_id": user_id},
+            {"$set": {"video_settings": current_settings}},
+            upsert=True
+        )
+        
+        logger.info(f"Configuración personalizada aplicada para usuario {user_id}: {settings}")
+        return True
+    except Exception as e:
+        logger.error(f"Error aplicando configuración personalizada: {e}")
+        return False
+
+# ======================== FIN SISTEMA DE PERSONALIZACIÓN ======================== #
+
 # ======================== NUEVAS FUNCIONES PARA EXPORTACIÓN/IMPORTACIÓN DE DB ======================== #
 
 @app.on_message(filters.command("getdb") & filters.user(admin_users))
@@ -1024,8 +1136,8 @@ async def download_media_with_cancellation(message, msg, user_id, start_time):
             await download_task
         except asyncio.CancelledError:
             # La descarga fue cancelada
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            if original_video_path and os.path.exists(original_video_path):
+                os.remove(original_video_path)
             raise
         
         # Verificar si la descarga fue cancelada durante el proceso
@@ -1626,10 +1738,11 @@ def get_main_menu_keyboard():
 @app.on_message(filters.command("settings") & filters.private)
 async def settings_menu(client, message):
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗜️Compresión General🔧", callback_data="general")],
-        [InlineKeyboardButton("📱 Reels y Videos cortos", callback_data="reels")],
-        [InlineKeyboardButton("📺 Shows/Reality", callback_data="show")],
-        [InlineKeyboardButton("🎬 Anime y series animadas", callback_data="anime")]
+        [InlineKeyboardButton("🗜️ Compresión General", callback_data="general_menu")],
+        [InlineKeyboardButton("📱 Videos en Vertical", callback_data="reels_menu")],
+        [InlineKeyboardButton("📺 Shows|Calidad media", callback_data="show_menu")],
+        [InlineKeyboardButton("🎬 Anime y series animadas", callback_data="anime_menu")],
+        [InlineKeyboardButton("🛠️ Personalizar Calidad 🔧", callback_data="custom_quality_start")]
     ])
 
     await send_protected_message(
@@ -1687,19 +1800,174 @@ async def planes_command(client, message):
 
 @app.on_callback_query()
 async def callback_handler(client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    
+    # Mapa de configuraciones para cada calidad
     config_map = {
-        "general": "resolution=854x480 crf=28 audio_bitrate=64k fps=22 preset=veryfast codec=libx264",
-        "reels": "resolution=420x720 crf=25 audio_bitrate=64k fps=30 preset=veryfast codec=libx264",
-        "show": "resolution=854x480 crf=32 audio_bitrate=64k fps=20 preset=veryfast codec=libx264",
-        "anime": "resolution=854x480 crf=32 audio_bitrate=64k fps=18 preset=veryfast codec=libx264"
+        "general_v1": "resolution=854x480 crf=28 audio_bitrate=64k fps=22 preset=veryfast codec=libx264",
+        "general_v2": "resolution=854x480 crf=28 audio_bitrate=128k fps=22 preset=veryfast codec=libx264",
+        "reels_v1": "resolution=420x720 crf=25 audio_bitrate=64k fps=30 preset=veryfast codec=libx264",
+        "reels_v2": "resolution=420x720 crf=25 audio_bitrate=128k fps=30 preset=veryfast codec=libx264",
+        "show_v1": "resolution=854x480 crf=32 audio_bitrate=64k fps=20 preset=veryfast codec=libx264",
+        "show_v2": "resolution=854x480 crf=32 audio_bitrate=128k fps=20 preset=veryfast codec=libx264",
+        "anime_v1": "resolution=854x480 crf=32 audio_bitrate=64k fps=18 preset=veryfast codec=libx264",
+        "anime_v2": "resolution=854x480 crf=32 audio_bitrate=128k fps=18 preset=veryfast codec=libx264"
     }
 
+    # Nombres de calidad para mostrar
     quality_names = {
-        "general": "🗜️Compresión General🔧",
-        "reels": "📱 Reels y Videos cortos",
-        "show": "📺 Shows/Reality",
-        "anime": "🎬 Anime y series animadas"
+        "general_v1": "🗜️ Compresión General - V1 (audio normal)",
+        "general_v2": "🗜️ Compresión General - V2 (mejor audio)",
+        "reels_v1": "📱 Videos en Vertical - V1 (audio normal)",
+        "reels_v2": "📱 Videos en Vertical - V2 (mejor audio)",
+        "show_v1": "📺 Shows|Calidad media - V1 (audio normal)",
+        "show_v2": "📺 Shows|Calidad media - V2 (mejor audio)",
+        "anime_v1": "🎬 Anime y series animadas - V1 (audio normal)",
+        "anime_v2": "🎬 Anime y series animadas - V2 (mejor audio)"
     }
+
+    # ======================== NUEVO: SISTEMA DE PERSONALIZACIÓN ======================== #
+    
+    # Iniciar personalización de calidad
+    if callback_query.data == "custom_quality_start":
+        # Inicializar configuración temporal para el usuario
+        temp_custom_settings[user_id] = {}
+        
+        # Mostrar menú de CRF
+        keyboard = get_crf_keyboard()
+        await callback_query.message.edit_text(
+            "⚙️**CONFIGURAR CALIDAD**⚙️\n\nSelecciona el nivel de compresión CRF:",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Manejar selección de CRF
+    elif callback_query.data.startswith("custom_crf_"):
+        crf_value = callback_query.data.replace("custom_crf_", "")
+        if user_id not in temp_custom_settings:
+            temp_custom_settings[user_id] = {}
+        temp_custom_settings[user_id]['crf'] = crf_value
+        
+        keyboard = get_crf_keyboard(crf_value)
+        await callback_query.message.edit_text(
+            "⚙️**CONFIGURAR CALIDAD**⚙️\n\nSelecciona el nivel de compresión CRF:",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Navegar a FPS
+    elif callback_query.data == "custom_next_fps":
+        if user_id not in temp_custom_settings or 'crf' not in temp_custom_settings[user_id]:
+            await callback_query.answer("Debes seleccionar un CRF primero.", show_alert=True)
+            return
+        
+        keyboard = get_fps_keyboard()
+        await callback_query.message.edit_text(
+            "⚙️**CONFIGURAR FPS**⚙️\n\nSelecciona los frames por segundo:",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Volver a CRF desde FPS
+    elif callback_query.data == "custom_back_crf":
+        keyboard = get_crf_keyboard(temp_custom_settings.get(user_id, {}).get('crf'))
+        await callback_query.message.edit_text(
+            "⚙️**CONFIGURAR CALIDAD**⚙️\n\nSelecciona el nivel de compresión CRF:",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Manejar selección de FPS
+    elif callback_query.data.startswith("custom_fps_"):
+        fps_value = callback_query.data.replace("custom_fps_", "")
+        if user_id not in temp_custom_settings:
+            temp_custom_settings[user_id] = {}
+        temp_custom_settings[user_id]['fps'] = fps_value
+        
+        keyboard = get_fps_keyboard(fps_value)
+        await callback_query.message.edit_text(
+            "⚙️**CONFIGURAR FPS**⚙️\n\nSelecciona los frames por segundo:",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Navegar a Audio
+    elif callback_query.data == "custom_next_audio":
+        if user_id not in temp_custom_settings or 'fps' not in temp_custom_settings[user_id]:
+            await callback_query.answer("Debes seleccionar un FPS primero.", show_alert=True)
+            return
+        
+        keyboard = get_audio_keyboard()
+        await callback_query.message.edit_text(
+            "⚙️**CONFIGURAR AUDIO**⚙️\n\nSelecciona la calidad de audio:",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Volver a FPS desde Audio
+    elif callback_query.data == "custom_back_fps":
+        keyboard = get_fps_keyboard(temp_custom_settings.get(user_id, {}).get('fps'))
+        await callback_query.message.edit_text(
+            "⚙️**CONFIGURAR FPS**⚙️\n\nSelecciona los frames por segundo:",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Manejar selección de Audio
+    elif callback_query.data.startswith("custom_audio_"):
+        audio_value = callback_query.data.replace("custom_audio_", "")
+        if user_id not in temp_custom_settings:
+            temp_custom_settings[user_id] = {}
+        temp_custom_settings[user_id]['audio_bitrate'] = audio_value
+        
+        keyboard = get_audio_keyboard(audio_value)
+        await callback_query.message.edit_text(
+            "⚙️**CONFIGURAR AUDIO**⚙️\n\nSelecciona la calidad de audio:",
+            reply_markup=keyboard
+        )
+        return
+    
+    # Finalizar personalización
+    elif callback_query.data == "custom_finish":
+        if user_id not in temp_custom_settings:
+            await callback_query.answer("Error en la configuración. Intenta nuevamente.", show_alert=True)
+            return
+        
+        user_settings = temp_custom_settings[user_id]
+        if not all(key in user_settings for key in ['crf', 'fps', 'audio_bitrate']):
+            await callback_query.answer("Debes completar todos los pasos de configuración.", show_alert=True)
+            return
+        
+        # Aplicar la configuración personalizada
+        success = await apply_custom_settings(user_id, user_settings)
+        
+        if success:
+            # Limpiar configuración temporal
+            if user_id in temp_custom_settings:
+                del temp_custom_settings[user_id]
+            
+            # Mostrar mensaje de confirmación
+            confirmation_text = (
+                f"✅ **CALIDAD PERSONALIZADA CONFIGURADA**\n\n"
+                f"**Configuración aplicada:**\n"
+                f"• **Compresión CRF:** {user_settings['crf']}\n"
+                f"• **FPS:** {user_settings['fps']}\n"
+                f"• **Audio:** {user_settings['audio_bitrate']}"
+            )
+            
+            back_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Volver a Settings", callback_data="back_to_settings")]
+            ])
+            
+            await callback_query.message.edit_text(
+                confirmation_text,
+                reply_markup=back_keyboard
+            )
+        else:
+            await callback_query.answer("❌ Error al aplicar la configuración", show_alert=True)
+        return
+    
+    # ======================== FIN SISTEMA DE PERSONALIZACIÓN ========================
 
     # Manejar cancelación de tareas
     if callback_query.data.startswith("cancel_task_"):
@@ -1828,6 +2096,33 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 pass
         return
 
+    # Manejar menús de calidades
+    if callback_query.data.endswith("_menu"):
+        quality_type = callback_query.data.replace("_menu", "")
+        
+        if quality_type == "general":
+            title = "🗜️ Compresión General"
+        elif quality_type == "reels":
+            title = "📱 Videos en Vertical"
+        elif quality_type == "show":
+            title = "📺 Shows|Calidad media"
+        elif quality_type == "anime":
+            title = "🎬 Anime y series animadas"
+        else:
+            title = "Seleccionar Calidad"
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("V1 (audio normal)", callback_data=f"{quality_type}_v1")],
+            [InlineKeyboardButton("V2 (mejor audio)", callback_data=f"{quality_type}_v2")],
+            [InlineKeyboardButton("🔙 Volver", callback_data="back_to_settings")]
+        ])
+        
+        await callback_query.message.edit_text(
+            f"{title}\n\nSelecciona la calidad de audio:",
+            reply_markup=keyboard
+        )
+        return
+
     # Resto de callbacks (planes, configuraciones, etc.)
     if callback_query.data == "plan_back":
         try:
@@ -1901,18 +2196,27 @@ async def callback_handler(client, callback_query: CallbackQuery):
             
             quality_name = quality_names.get(callback_query.data, "Calidad Desconocida")
             
+            # Mostrar mensaje de confirmación específico según la calidad seleccionada
+            if callback_query.data.endswith("_v1"):
+                message_text = f"**{quality_name}\naplicada correctamente**✅"
+            elif callback_query.data.endswith("_v2"):
+                message_text = f"**{quality_name}\naplicada correctamente**✅"
+            else:
+                message_text = f"**{quality_name}\naplicada correctamente**✅"
+            
             await callback_query.message.edit_text(
-                f"**{quality_name}\naplicada correctamente**✅",
+                message_text,
                 reply_markup=back_keyboard
             )
         else:
             await callback_query.answer("❌ Error al aplicar la configuración", show_alert=True)
     elif callback_query.data == "back_to_settings":
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🗜️Compresión General🔧", callback_data="general")],
-            [InlineKeyboardButton("📱 Reels y Videos cortos", callback_data="reels")],
-            [InlineKeyboardButton("📺 Shows/Reality", callback_data="show")],
-            [InlineKeyboardButton("🎬 Anime y series animadas", callback_data="anime")]
+            [InlineKeyboardButton("🗜️ Compresión General", callback_data="general_menu")],
+            [InlineKeyboardButton("📱 Videos en Vertical", callback_data="reels_menu")],
+            [InlineKeyboardButton("📺 Shows|Calidad media", callback_data="show_menu")],
+            [InlineKeyboardButton("🎬 Anime y series animadas", callback_data="anime_menu")],
+            [InlineKeyboardButton("🛠️ Personalizar Calidad 🔧", callback_data="custom_quality_start")]
         ])
         await callback_query.message.edit_text(
             "⚙️𝗦𝗲𝗹𝗲𝗰𝗰𝗶𝗼𝗻𝗮𝗿 𝗖𝗮𝗹𝗶𝗱𝗮𝗱⚙️",
@@ -1955,7 +2259,7 @@ async def start_command(client, message):
             "**🤖 Bot para comprimir videos**\n"
             "➣**Creado por** @InfiniteNetworkAdmin\n\n"
             "**¡Bienvenido!** Puedo reducir el tamaño de los vídeos hasta un 80% o más y se verán bien sin perder tanta calidad\nUsa los botones del menú para interactuar conmigo.\nSi tiene duda use el botón ℹ️ Ayuda\n\n"
-            "**⚙️ Versión 20.0.5 ⚙️**"
+            "**⚙️ Versión 20.5.0 ⚙️**"
         )
         
         # Enviar la foto con el caption
