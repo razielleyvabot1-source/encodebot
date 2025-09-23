@@ -209,8 +209,6 @@ async def apply_custom_settings(user_id, settings):
         logger.error(f"Error aplicando configuración personalizada: {e}")
         return False
 
-# ======================== FIN SISTEMA DE PERSONALIZACIÓN ======================== #
-
 # ======================== NUEVAS FUNCIONES PARA EXPORTACIÓN/IMPORTACIÓN DE DB ======================== #
 
 @app.on_message(filters.command("getdb") & filters.user(admin_users))
