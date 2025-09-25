@@ -21,6 +21,9 @@ from pymongo import MongoClient
 from config import *
 from bson.objectid import ObjectId
 import uuid
+import zipfile
+import io
+from bson.json_util import dumps
 
 # Configuración de logging
 logging.basicConfig(
@@ -307,6 +310,86 @@ async def handle_db_restore(client, message):
     except Exception as e:
         logger.error(f"Error restaurando base de datos: {e}", exc_info=True)
         await message.reply("❌ Error al restaurar la base de datos.")
+        
+# ======================== NUEVO COMANDO BACKUP ======================== #
+
+@app.on_message(filters.command("backup") & filters.user(admin_users))
+async def backup_command(client, message):
+    """Crea un backup completo de todas las colecciones de la base de datos"""
+    try:
+        # Enviar mensaje de inicio
+        msg = await message.reply("🔄 **Creando backup de la base de datos...**")
+        
+        # Crear un archivo ZIP en memoria
+        zip_buffer = io.BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Lista de colecciones a respaldar
+            collections = [
+                "active_compressions",
+                "banned_users", 
+                "pending_confirmations",
+                "temp_keys",
+                "user_settings",
+                "users"
+            ]
+            
+            # Contador de documentos
+            total_documents = 0
+            
+            for collection_name in collections:
+                try:
+                    # Obtener la colección
+                    collection = db[collection_name]
+                    
+                    # Obtener todos los documentos
+                    documents = list(collection.find({}))
+                    
+                    # Convertir a JSON
+                    json_data = dumps(documents, indent=2, default=str)
+                    
+                    # Agregar al ZIP
+                    zip_file.writestr(f"{collection_name}.json", json_data)
+                    
+                    total_documents += len(documents)
+                    
+                    logger.info(f"Backup: {collection_name} - {len(documents)} documentos")
+                    
+                except Exception as e:
+                    logger.error(f"Error respaldando {collection_name}: {e}")
+                    # Continuar con las demás colecciones incluso si una falla
+        
+        # Preparar el archivo para enviar
+        zip_buffer.seek(0)
+        
+        # Obtener fecha actual para el nombre del archivo
+        current_date = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"backup_{current_date}.zip"
+        
+        # Enviar el archivo ZIP
+        await message.reply_document(
+            document=zip_buffer,
+            file_name=filename,
+            caption=f"✅ **Backup completado**\n\n"
+                   f"📊 **Colecciones respaldadas:** {len(collections)}\n"
+                   f"📄 **Documentos totales:** {total_documents}\n"
+                   f"⏰ **Fecha:** {current_date.replace('_', ' ')}"
+        )
+        
+        # Eliminar mensaje de progreso
+        try:
+            await msg.delete()
+        except:
+            pass
+            
+        logger.info(f"Backup creado por {message.from_user.id} con {total_documents} documentos")
+        
+    except Exception as e:
+        logger.error(f"Error en backup_command: {e}", exc_info=True)
+        try:
+            await msg.edit("❌ **Error al crear el backup**")
+        except:
+            await message.reply("❌ **Error al crear el backup**")
 
 # ======================== FUNCIÓN PARA FORMATEAR TIEMPO ======================== #
 
@@ -3386,10 +3469,16 @@ async def handle_message(client, message):
                 await restart_command(client, message)
         elif text.startswith(('/getdb', '.getdb')):
             if user_id in admin_users:
-                await get_db_command(client, message)
+                await get_db_command(client, message)                
+        elif text.startswith(('/getlog', '.getlog')):
+            if user_id in admin_users:
+                await get_log_command(client, message)
         elif text.startswith(('/restdb', '.restdb')):
             if user_id in admin_users:
                 await rest_db_command(client, message)
+        elif text.startswith(('/backup', '.backup')):
+            if user_id in admin_users:
+                await backup_command(client, message)
 
         if message.reply_to_message:
             original_message = sent_messages.get(message.reply_to_message.id)
