@@ -2270,34 +2270,59 @@ async def callback_handler(client, callback_query: CallbackQuery):
             await callback_query.answer("⚠️ No se pudo cancelar la tarea", show_alert=True)
         return
       
-        # ======================== NUEVOS CALLBACKS PARA BOTONES DE COLA ========================
+    # ======================== NUEVOS CALLBACKS PARA LA COLA ======================== #
     
     # Manejar actualización de la cola
     if callback_query.data == "refresh_queue":
         try:
             # Obtener nuevo estado de la cola
-            queue_status, keyboard = await get_queue_status(user_id)
+            queue_text, queue_keyboard = await get_queue_status(user_id)
             
             # Actualizar el mensaje
-            await callback_query.message.edit_text(queue_status, reply_markup=keyboard)
-            await callback_query.answer("✅ Estado de cola actualizado")
+            await callback_query.message.edit_text(
+                queue_text,
+                reply_markup=queue_keyboard
+            )
+            await callback_query.answer("✅ Estado de la cola actualizado")
         except Exception as e:
             logger.error(f"Error actualizando cola: {e}")
-            await callback_query.answer("⏳ Procesando información...⏳", show_alert=False)
+            await callback_query.answer("⏳Procesando información⏳...")
         return
     
     # Manejar cierre del mensaje de cola
     elif callback_query.data == "close_queue":
         try:
+            # Eliminar el mensaje de estado de la cola
             await callback_query.message.delete()
-            await callback_query.answer("🗑️ Mensaje eliminado")
+            
+            # Buscar y eliminar el mensaje original "👀 Ver Cola"
+            # Asumiendo que el mensaje original está 1 posición antes en el chat
+            try:
+                message_id = callback_query.message.id
+                # Intentar eliminar el mensaje anterior (que sería el "👀 Ver Cola")
+                await app.delete_messages(
+                    callback_query.message.chat.id, 
+                    [message_id - 1]
+                )
+            except Exception as e:
+                logger.error(f"Error eliminando mensaje original de ver cola: {e}")
+                # Si no se puede eliminar el mensaje específico, intentar otra estrategia
+                try:
+                    # Buscar entre los últimos mensajes del chat
+                    async for message in app.get_chat_history(callback_query.message.chat.id, limit=5):
+                        if message.text and "👀 Ver Cola" in message.text:
+                            await message.delete()
+                            break
+                except Exception as e2:
+                    logger.error(f"Error alternativo eliminando mensaje ver cola: {e2}")
+            
+            await callback_query.answer("✅ Mensaje cerrado")
         except Exception as e:
-            logger.error(f"Error eliminando mensaje de cola: {e}")
-            await callback_query.answer("❌ Error al eliminar❌", show_alert=False)
+            logger.error(f"Error cerrando mensaje de cola: {e}")
+            await callback_query.answer("❌ Error al cerrar el mensaje")
         return
     
     # ======================== RESTO DEL CÓDIGO DEL CALLBACK_HANDLER (sin cambios) ========================
-    # ... (el resto del código del callback_handler se mantiene igual)
     
     # Manejar confirmaciones de compresión
     if callback_query.data.startswith(("confirm_", "cancel_")):
