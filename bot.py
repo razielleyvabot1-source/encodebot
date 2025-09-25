@@ -488,7 +488,7 @@ async def get_queue_status(user_id=None):
                     username = f"Usuario {comp_user_id}"
                 
                 # Obtener información de progreso en tiempo real
-                stage_display = "**compresión**"
+                stage_display = "**🗜️Compresión**"
                 progress_bar = "[⬡⬡⬡⬡⬡⬡⬡⬡] 0%"
                 
                 if compression_id in compression_progress:
@@ -498,15 +498,15 @@ async def get_queue_status(user_id=None):
                     
                     # Traducir etapa
                     if stage == "download":
-                        stage_display = "**descarga**"
+                        stage_display = "**⬇️Descarga**"
                     elif stage == "compression":
-                        stage_display = "**compresión**"
+                        stage_display = "**🗜️Compresión**"
                     elif stage == "upload":
-                        stage_display = "**subida**"
+                        stage_display = "**⬆️Subida**"
                     
                     progress_bar = create_mini_progress_bar(percent)
                 
-                response += f"{i}. {username} ➧ {progress_bar} [{stage_display}]\n"
+                response += f"{i}. {username} ➧ {progress_bar}\n[{stage_display}]\n"
         else:
             response += "🔄 **Procesos activos:**\n• Ninguno\n"
         
@@ -1382,7 +1382,7 @@ async def startup_command(_, message):
         for i in range(1):  # Crear 1 workers
             task = asyncio.create_task(process_compression_queue())
             processing_tasks.append(task)
-        await msg.edit("✅ Procesamiento de cola iniciado con 3 workers simultáneos.")
+        await msg.edit("✅ Procesamiento de cola iniciado con 1 worker")
     else:
         await msg.edit("✅ Los workers de procesamiento ya están activos.")
 
@@ -2230,9 +2230,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
             # Editar mensaje de confirmación para mostrar estado
             queue_size = compression_queue.qsize()
             wait_msg = await callback_query.message.edit_text(
-                f"⏳ Tu video ha sido añadido to la cola.\n\n"
-                f"📋 Tamaño actual de la cola: {queue_size}\n\n"
-                f"• **Espere que otros procesos terminen** ⏳"
+                f"✅ Tu video ha sido añadido a la cola.\n\n"
+                f"• ⏳**Espere que otros procesos terminen** ⏳"
             )
 
             # Obtener timestamp y encolar
