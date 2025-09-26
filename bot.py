@@ -329,6 +329,7 @@ async def backup_command(client, message):
                 "active_compressions",
                 "banned_users", 
                 "pending_confirmations",
+                "pending",
                 "temp_keys",
                 "user_settings",
                 "users"
@@ -554,7 +555,7 @@ async def get_queue_status(user_id=None):
         
         # Construir respuesta
         response = "📊 **Estado de la cola**\n\n"
-        response += f"💠 **Procesos activos:** {active_count}/{max_simultaneous}\n\n"
+        response += f"💠 **Proceso activo:** {active_count}/{max_simultaneous}\n\n"
         
         # Procesos activos
         if active_compr:
@@ -1228,13 +1229,14 @@ async def check_user_limit(user_id: int) -> bool:
     return False
 
 # En la función get_plan_info, modifica el mensaje para incluir el botón
-async def get_plan_info(user_id: int) -> str:
-    """Obtiene información del plan del usuario para mostrar"""
+async def get_plan_info(user_id: int):
+    """Obtiene información del plan del usuario para mostrar con botón de actualizar"""
     user = await get_user_plan(user_id)
     if user is None or user.get("plan") is None:
         # Mensaje modificado para incluir el botón
         return (
-            "**No tienes un plan activo.**\n\n⬇️**Toque para ver nuestros planes**⬇️"
+            "**No tienes un plan activo.**\n\n⬇️**Toque para ver nuestros planes**⬇️",
+            None
         )
     
     plan_name = user["plan"].capitalize()
@@ -1255,20 +1257,32 @@ async def get_plan_info(user_id: int) -> str:
             minutes = (time_remaining.seconds % 3600) // 60
             seconds = time_remaining.seconds % 60
             
-            # Formatear texto con días, minutos y segundos
+            # Formatear texto con días, horas, minutos y segundos (MODIFICADO)
             if days > 0:
-                expires_text = f"{days} días {minutes}min {seconds}s"
+                # Cuando hay días, mostrar días y horas
+                expires_text = f"{days}d {hours}h {minutes}m {seconds}s"
             elif hours > 0:
+                # Cuando hay horas pero no días, mostrar horas y minutos
                 expires_text = f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                # Cuando hay minutos pero no horas, mostrar minutos y segundos
+                expires_text = f"{minutes}m {seconds}s"
             else:
-                expires_text = f"{minutes} minutos {seconds} segundos"
+                # Cuando solo quedan segundos, mostrar solo segundos
+                expires_text = f"{seconds}s"
+    
+    # Crear teclado con botón de actualizar
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Actualizar", callback_data="refresh_plan")]
+    ])
     
     return (
         f"╭✠━━━━━━━━━━━━━━━━━━✠╮\n"
         f"┠➣ **Plan actual**: {plan_name}\n"
         f"┠➣ **Tiempo restante**:\n"
         f"┠➣ {expires_text}\n"
-        f"╰✠━━━━━━━━━━━━━━━━━━✠╯"
+        f"╰✠━━━━━━━━━━━━━━━━━━✠╯",
+        keyboard
     )
 
 # ======================== FUNCIÓN PARA VERIFICAR VÍDEOS EN COLA ======================== #
@@ -2321,6 +2335,23 @@ async def callback_handler(client, callback_query: CallbackQuery):
             logger.error(f"Error cerrando mensaje de cola: {e}")
             await callback_query.answer("❌ Error al cerrar el mensaje")
         return
+        
+            # Manejar actualización del plan
+    elif callback_query.data == "refresh_plan":
+        try:
+            user_id = callback_query.from_user.id
+            plan_info, keyboard = await get_plan_info(user_id)
+            
+            # Actualizar el mensaje
+            await callback_query.message.edit_text(
+                plan_info,
+                reply_markup=keyboard
+            )
+            await callback_query.answer("✅ Información del plan actualizada")
+        except Exception as e:
+            logger.error(f"Error actualizando plan: {e}")
+            await callback_query.answer("⏳Procesando información⏳...")
+        return
     
     # ======================== RESTO DEL CÓDIGO DEL CALLBACK_HANDLER (sin cambios) ========================
     
@@ -2894,11 +2925,11 @@ async def my_plan_command(client, message):
                 reply_markup=keyboard
             )
         else:
-            plan_info = await get_plan_info(user_id)
+            plan_info, keyboard = await get_plan_info(user_id)
             await send_protected_message(
                 message.chat.id, 
                 plan_info,
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=keyboard
             )
     except Exception as e:
         logger.error(f"Error en my_plan_command: {e}", exc_info=True)
