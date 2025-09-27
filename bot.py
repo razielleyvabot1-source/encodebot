@@ -1271,9 +1271,12 @@ async def get_plan_info(user_id: int):
                 # Cuando solo quedan segundos, mostrar solo segundos
                 expires_text = f"{seconds}s"
     
-    # Crear teclado con botón de actualizar
+    # MODIFICACIÓN: Crear teclado con botón de actualizar y cerrar
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Actualizar", callback_data="refresh_plan")]
+        [
+            InlineKeyboardButton("🔄 Actualizar", callback_data="refresh_plan"),
+            InlineKeyboardButton("❌ Cerrar", callback_data="close_plan")
+        ]
     ])
     
     return (
@@ -2285,7 +2288,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
         return
       
     # ======================== NUEVOS CALLBACKS PARA LA COLA ======================== #
-    
+
     # Manejar actualización de la cola
     if callback_query.data == "refresh_queue":
         try:
@@ -2335,8 +2338,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
             logger.error(f"Error cerrando mensaje de cola: {e}")
             await callback_query.answer("❌ Error al cerrar el mensaje")
         return
-        
-            # Manejar actualización del plan
+    
+    # Manejar actualización del plan
     elif callback_query.data == "refresh_plan":
         try:
             user_id = callback_query.from_user.id
@@ -2351,6 +2354,38 @@ async def callback_handler(client, callback_query: CallbackQuery):
         except Exception as e:
             logger.error(f"Error actualizando plan: {e}")
             await callback_query.answer("⏳Procesando información⏳...")
+        return
+    
+    # Manejar cierre del mensaje de plan
+    elif callback_query.data == "close_plan":
+        try:
+            # Eliminar el mensaje de estado del plan
+            await callback_query.message.delete()
+            
+            # Buscar y eliminar el mensaje original "📊 Mi Plan"
+            try:
+                message_id = callback_query.message.id
+                # Intentar eliminar el mensaje anterior (que sería el "📊 Mi Plan")
+                await app.delete_messages(
+                    callback_query.message.chat.id, 
+                    [message_id - 1]
+                )
+            except Exception as e:
+                logger.error(f"Error eliminando mensaje original de mi plan: {e}")
+                # Si no se puede eliminar el mensaje específico, intentar otra estrategia
+                try:
+                    # Buscar entre los últimos mensajes del chat
+                    async for message in app.get_chat_history(callback_query.message.chat.id, limit=5):
+                        if message.text and "📊 Mi Plan" in message.text:
+                            await message.delete()
+                            break
+                except Exception as e2:
+                    logger.error(f"Error alternativo eliminando mensaje mi plan: {e2}")
+            
+            await callback_query.answer("✅ Mensaje cerrado")
+        except Exception as e:
+            logger.error(f"Error cerrando mensaje de plan: {e}")
+            await callback_query.answer("❌ Error al cerrar el mensaje")
         return
     
     # ======================== RESTO DEL CÓDIGO DEL CALLBACK_HANDLER (sin cambios) ========================
