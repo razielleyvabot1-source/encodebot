@@ -44,8 +44,16 @@ PLAN_PRIORITY = {
     "standard": 3
 }
 
+# Límites de compresión simultánea por plan
+PLAN_SIMULTANEOUS_LIMITS = {
+    "standard": 1,
+    "pro": 1,
+    "premium": 2,
+    "ultra": 3
+}
+
 # Límite de cola para usuarios premium
-PREMIUM_QUEUE_LIMIT = 3
+PREMIUM_QUEUE_LIMIT = 2
 ULTRA_QUEUE_LIMIT = 10
 
 # Conexión a MongoDB
@@ -98,7 +106,10 @@ DEFAULT_VIDEO_SETTINGS = {
 # Variables globales para la cola - MODIFICADO: Ahora permite hasta 3 compresiones simultáneas
 compression_queue = asyncio.Queue()
 processing_tasks = []  # Lista para almacenar múltiples tareas de procesamiento
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+# ======================== NUEVA VARIABLE PARA CONTROLAR WORKERS ======================== #
+CURRENT_MAX_WORKERS = 3  # Valor por defecto
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=CURRENT_MAX_WORKERS)
 
 # ======================== SISTEMA MEJORADO DE GESTIÓN DE COMPRESIONES ======================== #
 # MODIFICADO: Ahora usamos compression_id único para cada compresión
@@ -392,6 +403,58 @@ async def backup_command(client, message):
         except:
             await message.reply("❌ **Error al crear el backup**")
 
+# ======================== NUEVO COMANDO WORKERS ======================== #
+
+@app.on_message(filters.command("workers") & filters.user(admin_users))
+async def workers_command(client, message):
+    """Permite a los administradores cambiar el número de compresiones simultáneas"""
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            await message.reply("⚠️ **Formato:** `/workers <número>` (1-3)")
+            return
+            
+        try:
+            new_workers = int(parts[1])
+            if new_workers < 1 or new_workers > 3:
+                await message.reply("❌ **El número debe estar entre 1 y 3**")
+                return
+        except ValueError:
+            await message.reply("❌ **El valor debe ser un número entero**")
+            return
+            
+        global CURRENT_MAX_WORKERS, executor, processing_tasks
+        
+        if new_workers == CURRENT_MAX_WORKERS:
+            await message.reply(f"ℹ️ **El bot ya está configurado para {new_workers} workers**")
+            return
+            
+        # Detener los workers actuales
+        for task in processing_tasks:
+            task.cancel()
+            
+        # Esperar a que se cancelen
+        if processing_tasks:
+            await asyncio.gather(*processing_tasks, return_exceptions=True)
+            
+        # Crear nuevo executor con el nuevo número de workers
+        executor.shutdown(wait=False)
+        CURRENT_MAX_WORKERS = new_workers
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=CURRENT_MAX_WORKERS)
+        
+        # Reiniciar los workers
+        processing_tasks = []
+        for i in range(CURRENT_MAX_WORKERS):
+            task = asyncio.create_task(process_compression_queue())
+            processing_tasks.append(task)
+            
+        await message.reply(f"✅ **Workers actualizados a {CURRENT_MAX_WORKERS} compresiones simultáneas**")
+        logger.info(f"Workers cambiados a {CURRENT_MAX_WORKERS} por admin {message.from_user.id}")
+        
+    except Exception as e:
+        logger.error(f"Error en workers_command: {e}", exc_info=True)
+        await message.reply("❌ **Error al cambiar el número de workers**")
+
 # ======================== FUNCIÓN PARA FORMATEAR TIEMPO ======================== #
 
 def format_time(seconds):
@@ -444,6 +507,25 @@ async def reset_user_video_settings(user_id: int):
     """Restablece la configuración del usuario a los valores por defecto"""
     user_settings_col.delete_one({"user_id": user_id})
     logger.info(f"Configuración restablecida para usuario {user_id}")
+
+# ======================== NUEVO: SISTEMA DE LÍMITES DE COMPRESIÓN SIMULTÁNEA ======================== #
+
+async def get_user_simultaneous_limit(user_id: int) -> int:
+    """Obtiene el límite de compresiones simultáneas del usuario basado en su plan"""
+    user_plan = await get_user_plan(user_id)
+    if user_plan is None:
+        return 1  # Límite por defecto para usuarios sin plan
+    
+    plan = user_plan.get("plan", "standard")
+    return PLAN_SIMULTANEOUS_LIMITS.get(plan, 1)
+
+async def can_user_start_compression(user_id: int) -> bool:
+    """Verifica si el usuario puede iniciar una nueva compresión (no ha alcanzado su límite)"""
+    user_limit = await get_user_simultaneous_limit(user_id)
+    current_active = await get_active_compressions_count(user_id)
+    
+    logger.info(f"Usuario {user_id}: límite={user_limit}, activas={current_active}")
+    return current_active < user_limit
 
 # ======================== SISTEMA MEJORADO DE CANCELACIÓN ======================== #
 # MODIFICADO: Ahora usa compression_id único para cada compresión
@@ -537,8 +619,6 @@ def create_mini_progress_bar(percent, bar_length=8):
     except:
         return f"[⬡⬡⬡⬡⬡⬡⬡⬡] {int(percent)}%"
 
-# ======================== FUNCIÓN MEJORADA DE ESTADO DE COLA CON BOTONES ======================== #
-
 async def get_queue_status(user_id=None):
     """Obtiene el estado actual de la cola con información detallada y botones interactivos"""
     try:
@@ -551,11 +631,11 @@ async def get_queue_status(user_id=None):
         # Contadores
         active_count = len(active_compr)
         pending_count = len(pending_queue)
-        max_simultaneous = 1 
+        max_simultaneous = CURRENT_MAX_WORKERS
         
         # Construir respuesta
         response = "📊 **Estado de la cola**\n\n"
-        response += f"💠 **Proceso activo:** {active_count}/{max_simultaneous}\n\n"
+        response += f"💠 **Procesos activos:** {active_count}/{max_simultaneous}\n\n"
         
         # Procesos activos
         if active_compr:
@@ -617,11 +697,14 @@ async def get_queue_status(user_id=None):
                 except:
                     username = f"Usuario {pending_user_id}"
                 
+                # Obtener el límite del usuario
+                user_limit = await get_user_simultaneous_limit(pending_user_id)
+                
                 # Mostrar el usuario una vez con la cantidad de videos que tiene
                 response += f"{i}. {username}"
                 if count > 1:
                     response += f" ({count} videos)"
-                response += "\n"
+                response += f" [Límite: {user_limit}]\n"
         else:
             response += "• Ninguno\n"
         
@@ -638,6 +721,7 @@ async def get_queue_status(user_id=None):
             response += f"\n👑 **Vista de administrador:**\n"
             response += f"• **Total en cola:** {pending_count} video(s)\n"
             response += f"• **Tamaño de cola:** {compression_queue.qsize()}\n"
+            response += f"• **Workers activos:** {CURRENT_MAX_WORKERS}\n"
         
         # Crear teclado con botones interactivos
         keyboard = InlineKeyboardMarkup([
@@ -1483,13 +1567,13 @@ async def startup_command(_, message):
         except Exception as e:
             logger.error(f"Error cargando pendiente: {e}")
 
-    # Crear 1 tarea de procesamiento si no existen
+    # Crear tareas de procesamiento según CURRENT_MAX_WORKERS
     if not processing_tasks or all(task.done() for task in processing_tasks):
         processing_tasks = []
-        for i in range(1):  # Crear 1 workers
+        for i in range(CURRENT_MAX_WORKERS):  # MODIFICADO: Usar variable global
             task = asyncio.create_task(process_compression_queue())
             processing_tasks.append(task)
-        await msg.edit("✅ Procesamiento de cola iniciado con 1 worker")
+        await msg.edit(f"✅ Procesamiento de cola iniciado con {CURRENT_MAX_WORKERS} workers simultáneos.")
     else:
         await msg.edit("✅ Los workers de procesamiento ya están activos.")
 
@@ -1953,7 +2037,7 @@ async def compress_video(client, message: Message, start_msg):
                 if compression_id in active_messages:
                     del active_messages[compression_id]
                 if f"{compression_id}_upload" in active_messages:
-                    del active_messages[f"{compression_id}_upload"]
+                        del active_messages[f"{compression_id}_upload"]
                     
                 for file_path in [original_video_path, compressed_video_path]:
                     if file_path and os.path.exists(file_path):
@@ -2283,7 +2367,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
         else:
             await callback_query.answer("⚠️ No se pudo cancelar la tarea", show_alert=True)
         return
-      
+        
     # ======================== NUEVOS CALLBACKS PARA LA COLA ======================== #
     
     # Manejar actualización de la cola
@@ -2352,8 +2436,9 @@ async def callback_handler(client, callback_query: CallbackQuery):
             logger.error(f"Error actualizando plan: {e}")
             await callback_query.answer("⏳Procesando información⏳...")
         return
-    
+
     # ======================== RESTO DEL CÓDIGO DEL CALLBACK_HANDLER (sin cambios) ========================
+    # ... (el resto del código del callback_handler se mantiene igual)
     
     # Manejar confirmaciones de compresión
     if callback_query.data.startswith(("confirm_", "cancel_")):
@@ -2377,8 +2462,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await delete_confirmation(confirmation_id)
                 return
 
-            # Verificar si ya hay una compresión activa o en cola
-            user_plan = await get_user_plan(user_id)
+            # NUEVO: Verificar si el usuario puede iniciar una nueva compresión simultánea
+            can_start = await can_user_start_compression(user_id)
             queue_limit = await get_user_queue_limit(user_id)
             pending_count = pending_col.count_documents({"user_id": user_id})
             
@@ -2404,19 +2489,31 @@ async def callback_handler(client, callback_query: CallbackQuery):
             
             # Editar mensaje de confirmación para mostrar estado
             queue_size = compression_queue.qsize()
-            wait_msg = await callback_query.message.edit_text(
-                f"✅ Tu video ha sido añadido a la cola.\n\n"
-                f"• ⏳**Espere que otros procesos terminen** ⏳"
-            )
+            
+            # NUEVO: Mensaje diferente según si puede iniciar inmediatamente o va a la cola
+            if can_start:
+                wait_msg_text = (
+                    f"✅ Tu video ha sido añadido para procesamiento inmediato.\n\n"
+                    f"• ⏳**Espere que otros procesos terminen** ⏳"
+                )
+            else:
+                user_limit = await get_user_simultaneous_limit(user_id)
+                current_active = await get_active_compressions_count(user_id)
+                wait_msg_text = (
+                    f"✅ Tu video ha sido añadido a la cola.\n\n"
+                    f"• ⏳**Espere su turno** ⏳"
+                )
+            
+            wait_msg = await callback_query.message.edit_text(wait_msg_text)
 
             # Obtener timestamp y encolar
             timestamp = datetime.datetime.now()
             
-            # Crear tarea de procesamiento si no existen
+            # Crear tareas de procesamiento si no existen
             global processing_tasks
             if not processing_tasks or all(task.done() for task in processing_tasks):
                 processing_tasks = []
-                for i in range(1):  # Crear 1 workers
+                for i in range(CURRENT_MAX_WORKERS):  # MODIFICADO: Usar variable global
                     task = asyncio.create_task(process_compression_queue())
                     processing_tasks.append(task)
             
@@ -2508,8 +2605,9 @@ async def callback_handler(client, callback_query: CallbackQuery):
             await callback_query.message.edit_text(
                 "🧩**Plan Estándar**🧩\n\n"
                 "✅ **Beneficios:**\n"
-                "• **Videos para comprimir: ilimitados**\n\n"
-                "❌ **Desventajas:**\n• **No podá reenviar del bot**\n• **Solo podá comprimír 1 video a la ves**\n\n• **Precio:** **180Cup**💳 | **100Cup**📱\n• **Duración 7 dias**\n\n",
+                "• **Videos para comprimir: ilimitados**\n"
+                "• **Compresiones simultáneas: 1 video**\n• **Videos en cola**: 1\n\n"
+                "❌ **Desventajas:**\n• **No podá reenviar del bot**\n\n• **Precio:** **180Cup**💳 | **100Cup**📱\n• **Duración 7 dias**\n\n",
                 reply_markup=back_keyboard
             )
             
@@ -2518,7 +2616,9 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 "💎**Plan Pro**💎\n\n"
                 "✅ **Beneficios:**\n"
                 "• **Videos para comprimir: ilimitados**\n"
-                "• **Podá reenviar del bot**\n\n❌ **Desventajas**\n• **Solo podá comprimír 1 video a la ves**\n\n• **Precio:** **300Cup**💳 | **200Cup**📱\n• **Duración 15 dias**\n\n",
+                "• **Podá reenviar del bot**\n"
+                "• **Compresiones simultáneas: 1 video**\n• **Videos en cola**: 1\n\n"
+                "• **Precio:** **300Cup**💳 | **200Cup**📱\n• **Duración 15 dias**\n\n",
                 reply_markup=back_keyboard
             )
             
@@ -2528,7 +2628,8 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 "✅ **Beneficios:**\n"
                 "• **Videos para comprimir: ilimitados**\n"
                 "• **Soporte prioritario 24/7**\n• **Podá reenviar del bot**\n"
-                f"• **Múltiples videos en cola** (hasta {PREMIUM_QUEUE_LIMIT})\n\n"
+                f"• **Compresiones simultáneas: 2 videos**\n"
+                f"• **Videos en cola**: {PREMIUM_QUEUE_LIMIT}\n\n"
                 "• **Precio:** **500Cup**💳 | **300Cup**📱\n• **Duración 30 dias**\n\n",
                 reply_markup=back_keyboard
             )
@@ -3097,6 +3198,26 @@ async def admin_stats_command(client, message):
         logger.error(f"Error en admin_stats_command: {e}", exc_info=True)
         await message.reply("⚠️ **Error al generar estadísticas**")
 
+# ======================== COMANDO DE ADMIN COLA ACTUALIZADO ======================== #
+
+@app.on_message(filters.command(["cola", "queue"]) & filters.user(admin_users))
+async def ver_cola_command(client, message):
+    """Comando de administrador para ver la cola con botones interactivos"""
+    try:
+        # Usar la nueva función get_queue_status que retorna texto y teclado
+        queue_text, queue_keyboard = await get_queue_status(message.from_user.id)
+        
+        if queue_keyboard:
+            await message.reply(
+                queue_text,
+                reply_markup=queue_keyboard
+            )
+        else:
+            await message.reply(queue_text)
+    except Exception as e:
+        logger.error(f"Error en ver_cola_command: {e}")
+        await message.reply("❌ **Error al obtener el estado de la cola**")
+        
 # ======================== NUEVO COMANDO BROADCAST ======================== #
 
 async def broadcast_message(admin_id: int, message_text: str):
@@ -3173,7 +3294,7 @@ async def broadcast_command(client, message):
         logger.error(f"Error en broadcast_command: {e}", exc_info=True)
         await message.reply("⚠️ Error al iniciar la difusión")
 
-# ======================== COMANDO MEJORADO DE COLA CON BOTONES ======================== #
+# ======================== NUEVO COMANDO PARA VER COLA ======================== #
 
 async def queue_command(client, message):
     """Muestra información sobre la cola de compresión con botones interactivos"""
@@ -3188,9 +3309,17 @@ async def queue_command(client, message):
         )
         return
     
-    # Obtener estado de la cola con teclado
-    queue_status, keyboard = await get_queue_status(user_id)
-    await send_protected_message(message.chat.id, queue_status, reply_markup=keyboard)
+    # Usar la nueva función get_queue_status que retorna texto y teclado
+    queue_text, queue_keyboard = await get_queue_status(user_id)
+    
+    if queue_keyboard:
+        await send_protected_message(
+            message.chat.id, 
+            queue_text, 
+            reply_markup=queue_keyboard
+        )
+    else:
+        await send_protected_message(message.chat.id, queue_text)
 
 # ======================== NUEVA FUNCIÓN PARA NOTIFICAR A TODOS LOS USUARIOS ======================== #
 
@@ -3314,6 +3443,25 @@ async def restart_command(client, message):
     except Exception as e:
         logger.error(f"Error en restart_command: {e}", exc_info=True)
         await message.reply("⚠️ Error al ejecutar el comando de reinicio")
+        
+# ======================== NUEVO COMANDO GETLOG ======================== #
+
+@app.on_message(filters.command("getlog") & filters.user(admin_users))
+async def get_log_command(client, message):
+    try:
+        log_path = "bot.log"
+        if not os.path.isfile(log_path):
+            await message.reply("❌ No se encontró el archivo de log.")
+            return
+
+        await message.reply_document(
+            document=log_path,
+            caption="📄 **Archivo de log del bot**"
+        )
+        logger.info(f"Log enviado a {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Error enviando log: {e}", exc_info=True)
+        await message.reply("⚠️ Error al enviar el archivo de log.")
 
 # ======================== NUEVOS COMANDOS PARA CONFIGURACIÓN PERSONALIZADA ======================== #
 
@@ -3448,7 +3596,7 @@ async def handle_video(client, message: Message):
         if pending_count >= queue_limit:
             await send_protected_message(
                 message.chat.id,
-                f"Ya tienes {pending_count} videos en cola (límite: {queue_limit}).\n"
+                f"Ya tienes {pending_count} videos en cola o en proceso (límite: {queue_limit}).\n"
                 "Por favor espera a que se procesen antes de enviar más."
             )
             return
@@ -3479,6 +3627,7 @@ async def handle_video(client, message: Message):
         logger.info(f"Solicitud de confirmación creada para {user_id}: {message.video.file_name}")
     except Exception as e:
         logger.error(f"Error en handle_video: {e}", exc_info=True)
+
 
 @app.on_message(filters.text)
 async def handle_message(client, message):
@@ -3561,7 +3710,10 @@ async def handle_message(client, message):
                 await restart_command(client, message)
         elif text.startswith(('/getdb', '.getdb')):
             if user_id in admin_users:
-                await get_db_command(client, message)                
+                await get_db_command(client, message)
+        elif text.startswith(('/workers', '.workers')):
+            if user_id in admin_users:
+                await workers_command(client, message)
         elif text.startswith(('/getlog', '.getlog')):
             if user_id in admin_users:
                 await get_log_command(client, message)
