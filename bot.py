@@ -36,14 +36,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Diccionario de prioridades por plan (ahora solo para límites de cola)
-PLAN_PRIORITY = {
-    "ultra": 0,  
-    "premium": 1,
-    "pro": 2,
-    "standard": 3
-}
-
 # Límite de cola para usuarios premium
 PREMIUM_QUEUE_LIMIT = 3
 ULTRA_QUEUE_LIMIT = 10
@@ -555,11 +547,11 @@ async def get_queue_status(user_id=None):
         
         # Construir respuesta
         response = "📊 **Estado de la cola**\n\n"
-        response += f"💠 **Proceso activo:** {active_count}/{max_simultaneous}\n\n"
+        response += f"🔄 **Procesos activos:** {active_count}/{max_simultaneous}\n"
         
         # Procesos activos
         if active_compr:
-            response += "🔄 **Procesos activos:**\n"
+            response += "\n"
             
             for i, comp in enumerate(active_compr, 1):
                 compression_id = comp.get("compression_id")
@@ -1321,23 +1313,35 @@ def create_progress_bar(current, total, proceso, length=15):
 
 last_progress_update = {}
 
+
 async def progress_callback(current, total, msg, proceso, start_time):
-    """Callback para mostrar progreso de descarga/subida - MODIFICADO: Usa compression_id"""
+    """Callback para mostrar progreso de descarga/subida - FIX:
+    - Normaliza el compression_id cuando active_messages usa sufijos (ej. "<id>_upload")
+    - Usa el compression_id base para buscar cancel_tasks y registrar el progreso.
+    """
     try:
-        # Buscar el compression_id asociado a este mensaje
-        compression_id = None
-        for comp_id, msg_id in active_messages.items():
+        # Buscar la clave de mensaje en active_messages (puede tener sufijos como "_upload")
+        compression_key = None
+        for comp_key, msg_id in active_messages.items():
             if msg_id == msg.id:
-                compression_id = comp_id
+                compression_key = comp_key
                 break
-        
-        if not compression_id:
+
+        if not compression_key:
             return
-            
-        # Verificar si esta compresión aún está activa
+
+        # Normalizar compression_id: quitar sufijo "_upload" si existe u otros sufijos conocidos
+        compression_id = compression_key
+        if isinstance(compression_key, str):
+            # Si la clave contiene "_upload" la dividimos y tomamos la parte base
+            if compression_key.endswith("_upload"):
+                compression_id = compression_key.rsplit("_upload", 1)[0]
+            # (Si en el futuro añades otros sufijos, agrégalos aquí)
+
+        # Verificar que la compresión aún existe en cancel_tasks (usa el id base)
         if compression_id not in cancel_tasks:
             return
-            
+
         now = datetime.datetime.now()
         key = (msg.chat.id, msg.id)
         last_time = last_progress_update.get(key)
@@ -1348,53 +1352,51 @@ async def progress_callback(current, total, msg, proceso, start_time):
         last_progress_update[key] = now
 
         elapsed = time.time() - start_time
-        percentage = current / total
+        percentage = (current / total) if total and total > 0 else 0
         speed = current / elapsed if elapsed > 0 else 0
         eta = (total - current) / speed if speed > 0 else 0
 
+        # Generar la barra de progreso y textos
         progress_bar = create_progress_bar(current, total, proceso)
-        
-        # Formatear tiempos
         elapsed_str = format_time(elapsed)
         remaining_str = format_time(eta)
-        
-        # NUEVO: Actualizar progreso para monitoreo en tiempo real
+
+        # Actualizar datos de monitoreo en tiempo real (usar el compression_id base)
         stage = "download" if proceso == "DESCARGA" else "upload"
         update_compression_progress(
-            compression_id, 
-            stage, 
-            current, 
-            total, 
+            compression_id,
+            stage,
+            current,
+            total,
             percentage * 100,
-            "Archivo en proceso"  # Podríamos obtener el nombre del archivo si está disponible
+            "Archivo en proceso"
         )
-        
-        # SOLO MOSTRAR BOTÓN DE CANCELACIÓN SI NO ES DESCARGA
+
+        # MODIFICACIÓN: Solo mostrar botón de cancelar en etapas que NO sean descarga
         reply_markup = None
-        if proceso != "DESCARGA":
-            reply_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("⛔ Cancelar ⛔", callback_data=f"cancel_task_{compression_id}")
-            ]])
-        
+        if proceso != "DESCARGA":  # Solo mostrar botón en compresión y subida
+            reply_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("⛔ Cancelar ⛔", callback_data=f"cancel_task_{compression_id}")]
+            ])
+
         try:
+            # Editar el mensaje de progreso (msg) con la información actualizada
             await msg.edit(
                 f"   {progress_bar}\n"
                 f"┠ **Velocidad** {sizeof_fmt(speed)}/s\n"
                 f"┠ **Tiempo transcurrido:** {elapsed_str}\n"
                 f"┠ **Tiempo restante:** {remaining_str}\n╰━━━━━━━━━━━━━━━━━━╯\n",
-                reply_markup=reply_markup
+                reply_markup=reply_markup  # Aquí será None durante descarga, mostrando sin botón
             )
         except MessageNotModified:
             pass
         except Exception as e:
             logger.error(f"Error editando mensaje de progreso: {e}")
-            # Si falla, remover de mensajes activos
-            if compression_id in active_messages:
-                del active_messages[compression_id]
+            # Si falla, remover el mensaje activo correspondiente
+            if compression_key in active_messages:
+                del active_messages[compression_key]
     except Exception as e:
         logger.error(f"Error en progress_callback: {e}", exc_info=True)
-
-# ======================== FUNCIONALIDAD DE COLA POR ORDEN DE LLEGADA ======================== #
 
 async def process_compression_queue():
     """Procesa la cola de compresión - MODIFICADO: Ahora múltiples workers pueden procesar simultáneamente"""
@@ -1529,23 +1531,29 @@ async def compress_video(client, message: Message, start_msg):
         await add_active_compression(compression_id, user_id, message.video.file_id, message.video.file_name)
 
         # Crear mensaje de progreso como respuesta al video original
+        # MODIFICADO: Eliminado el mensaje "📥 Iniciando Descarga 📥"
+        # En su lugar, creamos directamente el mensaje con la barra de progreso
+        start_download_time = time.time()
+        
+        # Crear mensaje inicial con barra de progreso en 0%
+        progress_bar = create_progress_bar(0, 100, "DESCARGA")
         msg = await app.send_message(
             chat_id=message.chat.id,
-            text="📥 **Iniciando Descarga** 📥",
+            text=f"   {progress_bar}\n┠ **Velocidad** 0.00B/s\n┠ **Tiempo transcurrido:** 00:00\n┠ **Tiempo restante:** 00:00\n╰━━━━━━━━━━━━━━━━━━╯\n",
             reply_to_message_id=message.id  # Respuesta al video original
         )
         
         # REGISTRAR MENSAJE ACTIVO CON COMPRESSION_ID
         active_messages[compression_id] = msg.id
-        
-        # Agregar botón de cancelación CON COMPRESSION_ID
-        cancel_button = InlineKeyboardMarkup([[
-            InlineKeyboardButton("⛔ Cancelar ⛔", callback_data=f"cancel_task_{compression_id}")
-        ]])
-        await msg.edit_reply_markup(cancel_button)
+
+        # Borrar el mensaje de 'Iniciando compresión' ahora que apareció la barra de progreso
+        try:
+            if start_msg:
+                await start_msg.delete()
+        except Exception:
+            pass
         
         try:
-            start_download_time = time.time()
             # Registrar tarea de descarga CON COMPRESSION_ID
             register_cancelable_task(compression_id, "download", None, original_message_id=original_message_id, progress_message_id=msg.id)
             
@@ -1637,19 +1645,13 @@ async def compress_video(client, message: Message, start_msg):
             logger.error(f"Error obteniendo duración: {e}", exc_info=True)
             dur_total = 0
 
-        # Mensaje de inicio de compresión como respuesta al video
-        await msg.edit(
-            "╭━━━━[🤖**Compress Bot**]━━━━━╮\n"
-            "┠➣ 🗜️𝗖𝗼𝗺𝗽𝗿𝗶𝗺𝗶𝗲𝗻𝗱𝗼 𝗩𝗶𝗱𝗲𝗼🎬\n"
-            "┠➣ **Progreso**: 📤 𝘊𝘢𝘳𝘨𝘢𝘯𝘥𝘰 𝘝𝘪𝘥𝘦𝘰 📤\n"
-            "╰━━━━━━━━━━━━━━━━━━━━━╯",
-            reply_markup=cancel_button
-        )
+        # MODIFICADO: Eliminado el mensaje "📤 Cargando Vídeo 📤"
+        # Ahora pasamos directamente a la compresión
         
         compressed_video_path = f"{os.path.splitext(original_video_path)[0]}_compressed.mp4"
         logger.info(f"Ruta de compresión: {compressed_video_path}")
         
-        drawtext_filter = f"drawtext=text='@InfiniteNetwork_KG':x=w-tw-10:y=10:fontsize=20:fontcolor=white"
+        drawtext_filter = f"drawtext=text='@compressbot_oficial_bot':x=w-tw-10:y=10:fontsize=20:fontcolor=white"
 
         ffmpeg_command = [
             'ffmpeg', '-y', '-i', original_video_path,
@@ -1747,11 +1749,11 @@ async def compress_video(client, message: Message, start_msg):
                             try:
                                 await msg.edit(
                                     f"╭━━━━[**🤖Compress Bot**]━━━━━╮\n"
-                                    f"┠➣ 🗜️𝗖𝗼𝗺𝗽𝗿𝗶𝗺𝗶𝗲𝗻𝗱𝗼 𝗩𝗶𝗱𝗲𝗼🎬\n"
-                                    f"┠➣ **Progreso**: {bar}\n"
-                                    f"┠➣ **Tamaño**: {sizeof_fmt(compressed_size)}\n"
-                                    f"┠➣ **Tiempo transcurrido**: {elapsed_str}\n"
-                                    f"┠➣ **Tiempo restante**: {remaining_str}\n"
+                                    f"┠🗜️𝗖𝗼𝗺𝗽𝗿𝗶𝗺𝗶𝗲𝗻𝗱𝗼 𝗩𝗶𝗱𝗲𝗼🎬\n"
+                                    f"┠**Progreso**: {bar}\n"
+                                    f"┠**Tamaño**: {sizeof_fmt(compressed_size)}\n"
+                                    f"┠**Tiempo transcurrido**: {elapsed_str}\n"
+                                    f"┠**Tiempo restante**: {remaining_str}\n"
                                     f"╰━━━━━━━━━━━━━━━━━━━━━╯",
                                     reply_markup=cancel_button
                                 )
@@ -1838,17 +1840,11 @@ async def compress_video(client, message: Message, start_msg):
             
             try:
                 start_upload_time = time.time()
-                # Mensaje de subida como respuesta al video original
-                upload_msg = await app.send_message(
-                    chat_id=message.chat.id,
-                    text="📤 **Subiendo video comprimido** 📤",
-                    reply_to_message_id=message.id
-                )
-                # REGISTRAR MENSAJE DE SUBIDA CON COMPRESSION_ID
-                active_messages[f"{compression_id}_upload"] = upload_msg.id
+                # MODIFICADO: Eliminado el mensaje "📤 Subiendo video comprimido 📤"
+                # Usamos el mismo mensaje de progreso para la subida
                 
                 # Registrar tarea de subida CON COMPRESSION_ID
-                register_cancelable_task(compression_id, "upload", None, original_message_id=original_message_id, progress_message_id=upload_msg.id)
+                register_cancelable_task(compression_id, "upload", None, original_message_id=original_message_id, progress_message_id=msg.id)
                 
                 # NUEVO: Actualizar progreso para monitoreo
                 update_compression_progress(compression_id, "upload", 0, 100, 0, message.video.file_name)
@@ -1869,14 +1865,11 @@ async def compress_video(client, message: Message, start_msg):
                     try:
                         await start_msg.delete()
                         await msg.delete()
-                        await upload_msg.delete()
                     except:
                         pass
                     # Remover de mensajes activos
                     if compression_id in active_messages:
                         del active_messages[compression_id]
-                    if f"{compression_id}_upload" in active_messages:
-                        del active_messages[f"{compression_id}_upload"]
                     # Enviar mensaje de cancelación respondiendo al video original
                     await send_protected_message(
                         message.chat.id,
@@ -1894,7 +1887,7 @@ async def compress_video(client, message: Message, start_msg):
                         duration=duration,
                         reply_to_message_id=message.id,
                         progress=progress_callback,
-                        progress_args=(upload_msg, "SUBIDA", start_upload_time)
+                        progress_args=(msg, "SUBIDA", start_upload_time)
                     )
                 else:
                     await send_protected_video(
@@ -1904,14 +1897,9 @@ async def compress_video(client, message: Message, start_msg):
                         duration=duration,
                         reply_to_message_id=message.id,
                         progress=progress_callback,
-                        progress_args=(upload_msg, "SUBIDA", start_upload_time)
+                        progress_args=(msg, "SUBIDA", start_upload_time)
                     )
                 
-                try:
-                    await upload_msg.delete()
-                    logger.info("Mensaje de subida eliminado")
-                except:
-                    pass
                 logger.info("✅ Video comprimido enviado como respuesta al original")
                 await notify_group(client, message, original_size, compressed_size=compressed_size, status="done")
              
@@ -1955,8 +1943,6 @@ async def compress_video(client, message: Message, start_msg):
                 # Limpiar mensajes activos
                 if compression_id in active_messages:
                     del active_messages[compression_id]
-                if f"{compression_id}_upload" in active_messages:
-                    del active_messages[f"{compression_id}_upload"]
                     
                 for file_path in [original_video_path, compressed_video_path]:
                     if file_path and os.path.exists(file_path):
