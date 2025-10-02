@@ -586,7 +586,7 @@ async def get_queue_status(user_id=None):
                 
                 response += f"{i}. {username} ➧ {progress_bar}\n[{stage_display}]\n"
         else:
-            response += "🔄 **Procesos activos:**\n• Ninguno\n"
+            response += "\n"
         
         # Lista de espera
         response += "\n⏳ **En proceso y en cola:**\n"
