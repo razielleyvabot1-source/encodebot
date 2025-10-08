@@ -1272,11 +1272,11 @@ async def get_plan_info(user_id: int):
     ])
     
     return (
-        f"╭✠━━━━━━━━━━━━━━━━━━✠╮\n"
+        f"╭✠━━━━━━━━━━━━━━━━✠╮\n"
         f"┠➣ **Plan actual**: {plan_name}\n"
         f"┠➣ **Tiempo restante**:\n"
         f"┠➣ {expires_text}\n"
-        f"╰✠━━━━━━━━━━━━━━━━━━✠╯",
+        f"╰✠━━━━━━━━━━━━━━━━✠╯",
         keyboard
     )
 
@@ -1385,7 +1385,7 @@ async def progress_callback(current, total, msg, proceso, start_time):
                 f"   {progress_bar}\n"
                 f"┠ **Velocidad** {sizeof_fmt(speed)}/s\n"
                 f"┠ **Tiempo transcurrido:** {elapsed_str}\n"
-                f"┠ **Tiempo restante:** {remaining_str}\n╰━━━━━━━━━━━━━━━━━━╯\n",
+                f"┠ **Tiempo restante:** {remaining_str}\n╰━━━━━━━━━━━━━━━━━╯\n",
                 reply_markup=reply_markup  # Aquí será None durante descarga, mostrando sin botón
             )
         except MessageNotModified:
@@ -2019,9 +2019,9 @@ async def get_plan_menu(user_id: int):
     plan_name = user["plan"].capitalize()
     
     return (
-        f"╭✠━━━━━━━━━━━━━━━━━━━━━━✠╮\n"
+        f"╭✠━━━━━━━━━━━━━━━━━━━✠╮\n"
         f"┠➣ **Tu plan actual**: {plan_name}\n"
-        f"╰✠━━━━━━━━━━━━━━━━━━━━━━✠╯\n\n"
+        f"╰✠━━━━━━━━━━━━━━━━━━━✠╯\n\n"
         "📋 **Selecciona un plan para más información:**"
     ), get_plan_menu_keyboard()
 
@@ -2522,7 +2522,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
         # Nuevo teclado con botón de contratar
         back_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 Volver", callback_data="plan_back"),
-             InlineKeyboardButton("📝 Contratar Plan", url="https://t.me/InfiniteNetworkAdmin?text=Hola,+estoy+interesad@+en+un+plan+del+bot+de+comprimír+vídeos")]
+             InlineKeyboardButton("📝 Contratar Plan", url="https://t.me/VirtualMix_Shop?text=Hola,+estoy+interesad@+en+un+plan+del+bot+de+comprimír+vídeos")]
         ])
         
         if plan_type == "standard":
@@ -2664,7 +2664,7 @@ async def main_menu_handler(client, message):
         elif text == "ℹ️ ayuda":
             # Crear teclado con botón de soporte
             support_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("👨🏻‍💻 Soporte", url="https://t.me/InfiniteNetworkAdmin")]
+                [InlineKeyboardButton("👨🏻‍💻 Soporte", url="https://t.me/VirtualMix_Shop")]
             ])
             
             await send_protected_message(
