@@ -60,7 +60,7 @@ app = Client(
     "compress_bot",
     api_id=api_id,
     api_hash=api_hash,
-    bot_token=bot_token
+    bot_token=bot_token,
 )
 
 # Administradores del bot
@@ -383,6 +383,106 @@ async def backup_command(client, message):
             await msg.edit("❌ **Error al crear el backup**")
         except:
             await message.reply("❌ **Error al crear el backup**")
+            
+# ======================== NUEVO COMANDO SETDAYS ======================== #
+
+async def add_days_to_all_users(days: int, admin_id: int):
+    """Agrega días a todos los usuarios excepto plan ultra"""
+    try:
+        # Obtener todos los usuarios con planes que expiran (excluyendo ultra)
+        users = list(users_col.find({
+            "plan": {"$in": ["standard", "pro", "premium"]},
+            "expires_at": {"$exists": True}
+        }))
+        
+        total_users = len(users)
+        updated_count = 0
+        failed_count = 0
+        
+        if total_users == 0:
+            return 0, 0, "No hay usuarios con planes que expiran para actualizar."
+        
+        # Actualizar cada usuario
+        for user in users:
+            try:
+                user_id = user["user_id"]
+                current_expires = user["expires_at"]
+                
+                # Verificar que current_expires es un datetime válido
+                if isinstance(current_expires, datetime.datetime):
+                    new_expires = current_expires + datetime.timedelta(days=days)
+                    
+                    # Actualizar en la base de datos
+                    users_col.update_one(
+                        {"user_id": user_id},
+                        {"$set": {"expires_at": new_expires}}
+                    )
+                    updated_count += 1
+                    
+                    # Notificar al usuario
+                    try:
+                        await send_protected_message(
+                            user_id,
+                            f"🎉 **¡Se han agregado {days} día(s) a tu plan!**\n\n"
+                            f"¡Disfruta del tiempo adicional! 🎬"
+                        )
+                        # Pequeña pausa para no saturar
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.error(f"Error notificando usuario {user_id}: {e}")
+                        failed_count += 1
+                        
+                else:
+                    logger.error(f"Fecha de expiración inválida para usuario {user_id}: {current_expires}")
+                    failed_count += 1
+                    
+            except Exception as e:
+                logger.error(f"Error actualizando usuario {user_id}: {e}")
+                failed_count += 1
+        
+        return updated_count, failed_count, f"Proceso completado: {updated_count} actualizados, {failed_count} fallos."
+        
+    except Exception as e:
+        logger.error(f"Error en add_days_to_all_users: {e}", exc_info=True)
+        return 0, 0, f"Error general: {str(e)}"
+
+@app.on_message(filters.command("setdays") & filters.user(admin_users))
+async def setdays_command(client, message):
+    """Comando para agregar días a todos los usuarios"""
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            await message.reply("⚠️ **Formato:** `/setdays <número_de_días>`\nEjemplo: `/setdays 2`")
+            return
+            
+        try:
+            days = int(parts[1])
+            if days <= 0:
+                await message.reply("❌ **El número de días debe ser mayor a 0**")
+                return
+        except ValueError:
+            await message.reply("❌ **El valor debe ser un número entero**")
+            return
+        
+        # Confirmación antes de ejecutar
+        confirm_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Confirmar", callback_data=f"confirm_setdays_{days}"),
+                InlineKeyboardButton("❌ Cancelar", callback_data="cancel_setdays")
+            ]
+        ])
+        
+        await message.reply(
+            f"⚠️ **¿Estás seguro de que quieres agregar {days} día(s) a TODOS los usuarios?**\n\n"
+            f"• **Días a agregar**: {days}\n"
+            f"• **Se notificará** a todos los usuarios afectados\n"
+            f"• **Esta acción no se puede deshacer**",
+            reply_markup=confirm_keyboard
+        )
+        
+    except Exception as e:
+        logger.error(f"Error en setdays_command: {e}", exc_info=True)
+        await message.reply("❌ **Error al procesar el comando**")            
 
 # ======================== FUNCIÓN PARA FORMATEAR TIEMPO ======================== #
 
@@ -586,7 +686,7 @@ async def get_queue_status(user_id=None):
                 
                 response += f"{i}. {username} ➧ {progress_bar}\n[{stage_display}]\n"
         else:
-            response += "• Ninguno\n"
+            response += "\n"
         
         # Lista de espera
         response += "\n⏳ **En proceso y en cola:**\n"
@@ -1272,11 +1372,11 @@ async def get_plan_info(user_id: int):
     ])
     
     return (
-        f"╭✠━━━━━━━━━━━━━━━━✠╮\n"
+        f"╭✠━━━━━━━━━━━━━━━━━━✠╮\n"
         f"┠➣ **Plan actual**: {plan_name}\n"
         f"┠➣ **Tiempo restante**:\n"
         f"┠➣ {expires_text}\n"
-        f"╰✠━━━━━━━━━━━━━━━━✠╯",
+        f"╰✠━━━━━━━━━━━━━━━━━━✠╯",
         keyboard
     )
 
@@ -1385,7 +1485,7 @@ async def progress_callback(current, total, msg, proceso, start_time):
                 f"   {progress_bar}\n"
                 f"┠ **Velocidad** {sizeof_fmt(speed)}/s\n"
                 f"┠ **Tiempo transcurrido:** {elapsed_str}\n"
-                f"┠ **Tiempo restante:** {remaining_str}\n╰━━━━━━━━━━━━━━━━━╯\n",
+                f"┠ **Tiempo restante:** {remaining_str}\n╰━━━━━━━━━━━━━━━━━━╯\n",
                 reply_markup=reply_markup  # Aquí será None durante descarga, mostrando sin botón
             )
         except MessageNotModified:
@@ -2019,9 +2119,9 @@ async def get_plan_menu(user_id: int):
     plan_name = user["plan"].capitalize()
     
     return (
-        f"╭✠━━━━━━━━━━━━━━━━━━━✠╮\n"
+        f"╭✠━━━━━━━━━━━━━━━━━━━━━━✠╮\n"
         f"┠➣ **Tu plan actual**: {plan_name}\n"
-        f"╰✠━━━━━━━━━━━━━━━━━━━✠╯\n\n"
+        f"╰✠━━━━━━━━━━━━━━━━━━━━━━✠╯\n\n"
         "📋 **Selecciona un plan para más información:**"
     ), get_plan_menu_keyboard()
 
@@ -2373,6 +2473,45 @@ async def callback_handler(client, callback_query: CallbackQuery):
             logger.error(f"Error cerrando mensaje de plan: {e}")
             await callback_query.answer("❌ Error al cerrar el mensaje")
         return
+        
+    # ======================== MANEJAR CONFIRMACIÓN DE SETDAYS ======================== #
+    
+    if callback_query.data.startswith("confirm_setdays_"):
+        if callback_query.from_user.id not in admin_users:
+            await callback_query.answer("⚠️ Solo los administradores pueden ejecutar esta acción", show_alert=True)
+            return
+            
+        try:
+            days = int(callback_query.data.split("_")[2])
+            
+            # Mostrar mensaje de procesamiento
+            await callback_query.message.edit_text(f"🔄 **Agregando {days} día(s) a todos los usuarios...**\n\n⏳ Esto puede tomar varios minutos...")
+            
+            # Ejecutar la función
+            updated_count, failed_count, result_message = await add_days_to_all_users(days, callback_query.from_user.id)
+            
+            # Mostrar resultados
+            result_text = (
+                f"✅ **Proceso de agregar días completado**\n\n"
+                f"• **Días agregados**: {days}\n"
+                f"• **Usuarios actualizados**: {updated_count}\n"
+                f"• **Errores**: {failed_count}\n\n"
+                f"{result_message}"
+            )
+            
+            await callback_query.message.edit_text(result_text)
+            await callback_query.answer("✅ Proceso completado")
+            
+        except Exception as e:
+            logger.error(f"Error en confirm_setdays: {e}", exc_info=True)
+            await callback_query.message.edit_text("❌ **Error al ejecutar el comando**")
+            await callback_query.answer("❌ Error en el proceso")
+        return
+        
+    elif callback_query.data == "cancel_setdays":
+        await callback_query.message.edit_text("❌ **Operación cancelada**")
+        await callback_query.answer("Operación cancelada")
+        return
     
     # ======================== RESTO DEL CÓDIGO DEL CALLBACK_HANDLER (sin cambios) ========================
     
@@ -2522,7 +2661,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
         # Nuevo teclado con botón de contratar
         back_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 Volver", callback_data="plan_back"),
-             InlineKeyboardButton("📝 Contratar Plan", url="https://t.me/VirtualMix_Shop?text=Hola,+estoy+interesad@+en+un+plan+del+bot+de+comprimír+vídeos")]
+             InlineKeyboardButton("📝 Contratar Plan", url="https://t.me/InfiniteNetworkAdmin?text=Hola,+estoy+interesad@+en+un+plan+del+bot+de+comprimír+vídeos")]
         ])
         
         if plan_type == "standard":
@@ -2630,7 +2769,7 @@ async def start_command(client, message):
             "**🤖 Bot para comprimir videos**\n"
             "➣**Creado por** @InfiniteNetworkAdmin\n\n"
             "**¡Bienvenido!** Puedo reducir el tamaño de los vídeos hasta un 80% o más y se verán bien sin perder tanta calidad\nUsa los botones del menú para interactuar conmigo.\nSi tiene duda use el botón ℹ️ Ayuda\n\n"
-            "**⚙️ Versión 21.5.0 F⚙️**"
+            "**⚙️ Versión 23.5.0 ⚙️**"
         )
         
         # Enviar la foto con el caption
@@ -2664,7 +2803,7 @@ async def main_menu_handler(client, message):
         elif text == "ℹ️ ayuda":
             # Crear teclado con botón de soporte
             support_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("👨🏻‍💻 Soporte", url="https://t.me/VirtualMix_Shop")]
+                [InlineKeyboardButton("👨🏻‍💻 Soporte", url="https://t.me/InfiniteNetworkAdmin")]
             ])
             
             await send_protected_message(
@@ -3582,7 +3721,10 @@ async def handle_message(client, message):
                 await restart_command(client, message)
         elif text.startswith(('/getdb', '.getdb')):
             if user_id in admin_users:
-                await get_db_command(client, message)                
+                await get_db_command(client, message)
+        elif text.startswith(('/workers', '.workers')):
+            if user_id in admin_users:
+                await workers_command(client, message)
         elif text.startswith(('/getlog', '.getlog')):
             if user_id in admin_users:
                 await get_log_command(client, message)
@@ -3592,6 +3734,9 @@ async def handle_message(client, message):
         elif text.startswith(('/backup', '.backup')):
             if user_id in admin_users:
                 await backup_command(client, message)
+        elif text.startswith(('/setdays', '.setdays')):
+            if user_id in admin_users:
+                await setdays_command(client, message)
 
         if message.reply_to_message:
             original_message = sent_messages.get(message.reply_to_message.id)
