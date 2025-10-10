@@ -1842,7 +1842,6 @@ async def compress_video(client, message: Message, start_msg):
             '-r', user_video_settings['fps'],
             '-preset', user_video_settings['preset'],
             '-c:v', user_video_settings['codec'],
-            '-threads', '1',
             compressed_video_path
         ]
         logger.info(f"Comando FFmpeg: {' '.join(ffmpeg_command)}")
