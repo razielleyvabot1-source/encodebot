@@ -41,7 +41,7 @@ PLAN_SIMULTANEOUS_LIMITS = {
     "standard": 1,
     "pro": 1,
     "premium": 1,
-    "ultra": 3
+    "ultra": 2  # Máximo 2 para no sobrecargar el VPS de 2 CPUs
 }
 
 # Límite de cola para usuarios premium
@@ -91,8 +91,9 @@ DEFAULT_VIDEO_SETTINGS = {
     'crf': '28',
     'audio_bitrate': '64k',
     'fps': '22',
-    'preset': 'veryfast',
-    'codec': 'libx264'
+    'preset': 'medium',  # Cambiado a medium para mejor calidad/velocidad
+    'codec': 'libx264',
+    'threads': '1'  # NUEVO: Forzar 1 hilo por compresión
 }
 
 # Variables globales para la cola 
@@ -100,8 +101,51 @@ compression_queue = asyncio.Queue()
 processing_tasks = []  # Lista para almacenar múltiples tareas de procesamiento
 
 # ======================== NUEVA VARIABLE PARA CONTROLAR WORKERS ======================== #
-CURRENT_MAX_WORKERS = 2  
+# MODIFICADO: Basado en CPUs disponibles
+import multiprocessing
+AVAILABLE_CPUS = max(1, multiprocessing.cpu_count())  # Detectar CPUs disponibles
+CURRENT_MAX_WORKERS = min(2, AVAILABLE_CPUS)  # Máximo 2 workers para 2 CPUs
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=CURRENT_MAX_WORKERS)
+
+# ======================== NUEVO: SISTEMA DE GESTIÓN DE CPU POR COMPRESIÓN ======================== #
+# Diccionario para controlar qué CPU está siendo usada por cada compresión
+cpu_assignments = {}  # {compression_id: cpu_affinity}
+available_cpus = list(range(AVAILABLE_CPUS))  # Lista de CPUs disponibles
+
+def assign_cpu_to_compression(compression_id):
+    """Asigna una CPU específica a una compresión para evitar contención"""
+    global available_cpus
+    
+    if not available_cpus:
+        logger.warning(f"No hay CPUs disponibles para {compression_id}, usando round-robin")
+        return None
+    
+    assigned_cpu = available_cpus.pop(0)
+    cpu_assignments[compression_id] = assigned_cpu
+    logger.info(f"CPU {assigned_cpu} asignada a compresión {compression_id}")
+    return assigned_cpu
+
+def release_cpu_from_compression(compression_id):
+    """Libera una CPU cuando una compresión termina"""
+    global available_cpus
+    
+    if compression_id in cpu_assignments:
+        released_cpu = cpu_assignments[compression_id]
+        available_cpus.append(released_cpu)
+        available_cpus.sort()  # Mantener ordenado
+        del cpu_assignments[compression_id]
+        logger.info(f"CPU {released_cpu} liberada de compresión {compression_id}")
+
+def set_process_cpu_affinity(process, cpu_id):
+    """Establece la afinidad de CPU para un proceso (sistemas Unix/Linux)"""
+    try:
+        if hasattr(os, 'sched_setaffinity') and cpu_id is not None:
+            os.sched_setaffinity(process.pid, [cpu_id])
+            logger.info(f"Afinidad de CPU establecida: proceso {process.pid} -> CPU {cpu_id}")
+            return True
+    except Exception as e:
+        logger.warning(f"No se pudo establecer afinidad de CPU: {e}")
+    return False
 
 # ======================== SISTEMA MEJORADO DE GESTIÓN DE COMPRESIONES ======================== #
 # MODIFICADO: Ahora usamos compression_id único para cada compresión
@@ -503,13 +547,13 @@ async def workers_command(client, message):
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            await message.reply("⚠️ **Formato:** `/workers <número>` (1-3)")
+            await message.reply(f"⚠️ **Formato:** `/workers <número>` (1-{AVAILABLE_CPUS})")
             return
             
         try:
             new_workers = int(parts[1])
-            if new_workers < 1 or new_workers > 3:
-                await message.reply("❌ **El número debe estar entre 1 y 3**")
+            if new_workers < 1 or new_workers > AVAILABLE_CPUS:
+                await message.reply(f"❌ **El número debe estar entre 1 y {AVAILABLE_CPUS}**")
                 return
         except ValueError:
             await message.reply("❌ **El valor debe ser un número entero**")
@@ -648,6 +692,8 @@ def unregister_ffmpeg_process(compression_id):
     """Elimina el registro de un proceso FFmpeg"""
     if compression_id in ffmpeg_processes:
         del ffmpeg_processes[compression_id]
+    # Liberar CPU asignada
+    release_cpu_from_compression(compression_id)
 
 def cancel_compression_task(compression_id):
     """Cancela una tarea específica de compresión usando compression_id"""
@@ -728,6 +774,7 @@ async def get_queue_status(user_id=None):
         # Construir respuesta
         response = "📊 **Estado de la cola**\n\n"
         response += f"🔄 **Procesos activos:** {active_count}/{max_simultaneous}\n"
+        response += f"💻 **CPUs disponibles:** {AVAILABLE_CPUS}\n"  # NUEVO: Mostrar CPUs
         
         # Procesos activos
         if active_compr:
@@ -748,6 +795,7 @@ async def get_queue_status(user_id=None):
                 # Obtener información de progreso en tiempo real
                 stage_display = "**🗜️Compresión**"
                 progress_bar = "[⬡⬡⬡⬡⬡⬡⬡⬡] 0%"
+                cpu_info = ""
                 
                 if compression_id in compression_progress:
                     progress_data = compression_progress[compression_id]
@@ -764,7 +812,11 @@ async def get_queue_status(user_id=None):
                     
                     progress_bar = create_mini_progress_bar(percent)
                 
-                response += f"{i}. {username} ➧ {progress_bar}\n[{stage_display}]\n"
+                # Mostrar información de CPU asignada
+                if compression_id in cpu_assignments:
+                    cpu_info = f" [CPU{cpu_assignments[compression_id]}]"
+                
+                response += f"{i}. {username}{cpu_info} ➧ {progress_bar}\n[{stage_display}]\n"
         else:
             response += "• Ninguno\n"
         
@@ -814,6 +866,7 @@ async def get_queue_status(user_id=None):
             response += f"• **Total en cola:** {pending_count} video(s)\n"
             response += f"• **Tamaño de cola:** {compression_queue.qsize()}\n"
             response += f"• **Workers activos:** {CURRENT_MAX_WORKERS}\n"
+            response += f"• **CPUs en uso:** {len(cpu_assignments)}/{AVAILABLE_CPUS}\n"
         
         # Crear teclado con botones interactivos
         keyboard = InlineKeyboardMarkup([
@@ -1053,6 +1106,8 @@ async def add_active_compression(compression_id: str, user_id: int, file_id: str
 async def remove_active_compression(compression_id: str):
     """Elimina una compresión activa por compression_id"""
     active_compressions_col.delete_one({"compression_id": compression_id})
+    # Liberar CPU asignada
+    release_cpu_from_compression(compression_id)
 
 async def get_active_compressions_count(user_id: int) -> int:
     """Obtiene el número de compresiones activas para un usuario"""
@@ -1834,6 +1889,7 @@ async def compress_video(client, message: Message, start_msg):
         
         drawtext_filter = f"drawtext=text='@compressbot_oficial_bot':x=w-tw-10:y=10:fontsize=20:fontcolor=white"
 
+        # ======================== NUEVO: COMANDO FFMPEG OPTIMIZADO PARA 1 CPU ======================== #
         ffmpeg_command = [
             'ffmpeg', '-y', '-i', original_video_path,
             '-vf', f"scale={user_video_settings['resolution']},{drawtext_filter}",
@@ -1841,6 +1897,7 @@ async def compress_video(client, message: Message, start_msg):
             '-b:a', user_video_settings['audio_bitrate'],
             '-r', user_video_settings['fps'],
             '-preset', user_video_settings['preset'],
+            '-threads', user_video_settings.get('threads', '1'),  # NUEVO: Forzar 1 hilo
             '-c:v', user_video_settings['codec'],
             compressed_video_path
         ]
@@ -1849,6 +1906,11 @@ async def compress_video(client, message: Message, start_msg):
         try:
             start_time = datetime.datetime.now()
             process = subprocess.Popen(ffmpeg_command, stderr=subprocess.PIPE, text=True, bufsize=1)
+            
+            # NUEVO: ASIGNAR CPU ESPECÍFICA A ESTA COMPRESIÓN
+            assigned_cpu = assign_cpu_to_compression(compression_id)
+            if assigned_cpu is not None:
+                set_process_cpu_affinity(process, assigned_cpu)
             
             # Registrar tarea de ffmpeg CON COMPRESSION_ID
             register_cancelable_task(compression_id, "ffmpeg", process, original_message_id=original_message_id, progress_message_id=msg.id)
@@ -1922,6 +1984,11 @@ async def compress_video(client, message: Message, start_msg):
                         update_compression_progress(compression_id, "compression", current_time, dur_total, percent, message.video.file_name)
                         
                         if percent - last_percent >= 5 or time.time() - last_update_time >= 5:
+                            # NUEVO: Mostrar información de CPU asignada
+                            cpu_info = ""
+                            if compression_id in cpu_assignments:
+                                cpu_info = f" [CPU{cpu_assignments[compression_id]}]"
+                            
                             bar = create_compression_bar(percent)
                             # Agregar botón de cancelación CON COMPRESSION_ID
                             cancel_button = InlineKeyboardMarkup([[
@@ -1929,7 +1996,7 @@ async def compress_video(client, message: Message, start_msg):
                             ]])
                             try:
                                 await msg.edit(
-                                    f"╭━━━━[**🤖Compress Bot**]━━━━━╮\n"
+                                    f"╭━━━━[**🤖Compress Bot{cpu_info}**]━━━━━╮\n"  # NUEVO: Mostrar CPU
                                     f"┠🗜️𝗖𝗼𝗺𝗽𝗿𝗶𝗺𝗶𝗲𝗻𝗱𝗼 𝗩𝗶𝗱𝗲𝗼🎬\n"
                                     f"┠**Progreso**: {bar}\n"
                                     f"┠**Tamaño**: {sizeof_fmt(compressed_size)}\n"
@@ -2231,14 +2298,14 @@ async def callback_handler(client, callback_query: CallbackQuery):
     
     # Mapa de configuraciones para cada calidad
     config_map = {
-        "general_v1": "resolution=854x480 crf=28 audio_bitrate=64k fps=22 preset=veryfast codec=libx264",
-        "general_v2": "resolution=854x480 crf=28 audio_bitrate=128k fps=22 preset=veryfast codec=libx264",
-        "reels_v1": "resolution=420x720 crf=25 audio_bitrate=64k fps=30 preset=veryfast codec=libx264",
-        "reels_v2": "resolution=420x720 crf=25 audio_bitrate=128k fps=30 preset=veryfast codec=libx264",
-        "show_v1": "resolution=854x480 crf=32 audio_bitrate=64k fps=20 preset=veryfast codec=libx264",
-        "show_v2": "resolution=854x480 crf=32 audio_bitrate=128k fps=20 preset=veryfast codec=libx264",
-        "anime_v1": "resolution=854x480 crf=32 audio_bitrate=64k fps=18 preset=veryfast codec=libx264",
-        "anime_v2": "resolution=854x480 crf=32 audio_bitrate=128k fps=18 preset=veryfast codec=libx264"
+        "general_v1": "resolution=854x480 crf=28 audio_bitrate=64k fps=22 preset=medium codec=libx264 threads=1",
+        "general_v2": "resolution=854x480 crf=28 audio_bitrate=128k fps=22 preset=medium codec=libx264 threads=1",
+        "reels_v1": "resolution=420x720 crf=25 audio_bitrate=64k fps=30 preset=medium codec=libx264 threads=1",
+        "reels_v2": "resolution=420x720 crf=25 audio_bitrate=128k fps=30 preset=medium codec=libx264 threads=1",
+        "show_v1": "resolution=854x480 crf=32 audio_bitrate=64k fps=20 preset=medium codec=libx264 threads=1",
+        "show_v2": "resolution=854x480 crf=32 audio_bitrate=128k fps=20 preset=medium codec=libx264 threads=1",
+        "anime_v1": "resolution=854x480 crf=32 audio_bitrate=64k fps=18 preset=medium codec=libx264 threads=1",
+        "anime_v2": "resolution=854x480 crf=32 audio_bitrate=128k fps=18 preset=medium codec=libx264 threads=1"
     }
 
     # Nombres de calidad para mostrar
